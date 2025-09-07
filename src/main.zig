@@ -5,12 +5,15 @@ const zlm = @import("zlm");
 
 const BaseWrapper = vk.BaseWrapper;
 
-const App = @import("App.zig");
+const HelloTriangle = @import("HelloTriangle.zig");
 
 pub fn main() !void {
-    var app = try App.init();
+    const allocator = std.heap.page_allocator;
 
-    app.run();
+    var app = HelloTriangle{
+        .allocator = allocator,
+    };
+    try app.run();
 }
 
 fn customGetInstanceProcAddress(instance: vk.Instance, procname: [*:0]const u8) vk.PfnVoidFunction {

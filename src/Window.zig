@@ -1,4 +1,5 @@
 const glfw = @import("glfw");
+const vk = @import("vulkan");
 
 window: *glfw.Window,
 width: u32,
@@ -26,6 +27,12 @@ fn initWindow(self: *Self) !void {
     glfw.windowHint(glfw.Resizable, @intFromBool(false));
 
     self.window = try glfw.createWindow(@intCast(self.width), @intCast(self.height), self.name, null, null);
+}
+
+pub fn createWindowSurface(self: *Self, instance: vk.Instance, surface: *vk.SurfaceKHR) !void {
+    if (glfw.createWindowSurface(instance, self.window, null, surface) != .success) {
+        return error.CreateWindowSurfaceFailed;
+    }
 }
 
 pub fn deinit(self: *Self) void {

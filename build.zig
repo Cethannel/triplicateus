@@ -54,33 +54,21 @@ pub fn build(b: *std.Build) void {
     const zlm = b.dependency("zlm", default_args);
     const zglfw = b.dependency("zglfw", default_args);
 
-    const spirv_target = b.resolveTargetQuery(.{
-        .cpu_arch = .spirv32,
-        .os_tag = .vulkan,
-        .cpu_model = .{ .explicit = &std.Target.spirv.cpu.vulkan_v1_2 },
-        .ofmt = .spirv,
+    const vert_cmd = b.addSystemCommand(&.{
+        "glslc",
+        "--target-env=vulkan1.2",
+        "-o",
     });
+    const vert_spv = vert_cmd.addOutputFileArg("vert.spv");
+    vert_cmd.addFileArg(b.path("src/shaders/simple_shader.vert"));
 
-    const vert_spv = b.addObject(.{
-        .name = "vertex_shader",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/shaders/vertex.zig"),
-            .target = spirv_target,
-            .imports = &.{
-                .{ .name = "zlm", .module = zlm.module("zlm") },
-            },
-        }),
-        .use_llvm = false,
+    const frag_cmd = b.addSystemCommand(&.{
+        "glslc",
+        "--target-env=vulkan1.2",
+        "-o",
     });
-
-    const frag_spv = b.addObject(.{
-        .name = "fragment_shader",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/shaders/fragment.zig"),
-            .target = spirv_target,
-        }),
-        .use_llvm = false,
-    });
+    const frag_spv = frag_cmd.addOutputFileArg("frag.spv");
+    frag_cmd.addFileArg(b.path("src/shaders/simple_shader.frag"));
 
     const exe_mod = b.createModule(.{
         // b.createModule defines a new module just like b.addModule but,
@@ -112,12 +100,12 @@ pub fn build(b: *std.Build) void {
 
     exe_mod.addAnonymousImport(
         "vertex_shader",
-        .{ .root_source_file = vert_spv.getEmittedBin() },
+        .{ .root_source_file = vert_spv },
     );
 
     exe_mod.addAnonymousImport(
         "fragment_shader",
-        .{ .root_source_file = frag_spv.getEmittedBin() },
+        .{ .root_source_file = frag_spv },
     );
 
     // Here we define an executable. An executable needs to have a root module
@@ -140,6 +128,9 @@ pub fn build(b: *std.Build) void {
         .name = "triplicateus",
         .root_module = exe_mod,
     });
+
+    exe.step.dependOn(&vert_cmd.step);
+    exe.step.dependOn(&frag_cmd.step);
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
