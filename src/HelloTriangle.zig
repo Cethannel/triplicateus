@@ -95,6 +95,12 @@ const vertices = [_]Vertex{
 
 const indices = [_]u16{ 0, 1, 2, 2, 3, 0 };
 
+const UniformBuffer = extern struct {
+    model: zlm.Mat4,
+    view: zlm.Mat4,
+    proj: zlm.Mat4,
+};
+
 const WIDTH = 800;
 const HEIGHT = 600;
 const MAX_FRAMES_IN_FLIGHT = 2;
@@ -162,6 +168,7 @@ fn initVulkan(self: *Self) !void {
     try self.createSwapChain();
     try self.createImageViews();
     try self.createRenderPass();
+    try self.createDescriptorSetLayout();
     try self.createGraphicsPipeline();
     try self.createFramebuffers();
     try self.createCommandPool();
@@ -874,6 +881,10 @@ fn findMemoryType(self: *Self, type_filter: u32, properties: vk.MemoryPropertyFl
 
     std.log.err("Failed to find suitable memory type", .{});
     return error.NoSuitableMemoryType;
+}
+
+fn createDescriptorSetLayout(self: *Self) !void {
+    const ubo_layout_binding: vkl.Desc
 }
 
 fn createGraphicsPipeline(self: *Self) !void {
