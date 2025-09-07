@@ -35,12 +35,18 @@ pipeline_layout: vk.PipelineLayout = .null_handle,
 graphics_pipeline: vk.Pipeline = .null_handle,
 
 command_pool: vk.CommandPool = .null_handle,
+descriptor_pool: vk.DescriptorPool = .null_handle,
+descriptor_sets: [MAX_FRAMES_IN_FLIGHT]vk.DescriptorSet = @splat(.null_handle),
 command_buffers: [MAX_FRAMES_IN_FLIGHT]vk.CommandBuffer = @splat(.null_handle),
 
 vertex_buffer: vk.Buffer = .null_handle,
 vertex_buffer_memory: vk.DeviceMemory = .null_handle,
 index_buffer: vk.Buffer = .null_handle,
 index_buffer_memory: vk.DeviceMemory = .null_handle,
+
+uniform_buffers: [MAX_FRAMES_IN_FLIGHT]vk.Buffer = @splat(.null_handle),
+uniform_buffers_memory: [MAX_FRAMES_IN_FLIGHT]vk.DeviceMemory = @splat(.null_handle),
+uniform_buffers_mapped: [MAX_FRAMES_IN_FLIGHT]?*anyopaque = @splat(null),
 
 vkb: BaseWrapper = undefined,
 vki: InstanceWrapper = undefined,
@@ -54,6 +60,8 @@ in_flight_fences: [MAX_FRAMES_IN_FLIGHT]vk.Fence = @splat(.null_handle),
 frame_buffer_resized: bool = false,
 
 current_frame: usize = 0,
+
+start_time: std.time.Instant = undefined,
 
 const Self = @This();
 
@@ -96,7 +104,7 @@ const vertices = [_]Vertex{
 
 const indices = [_]u16{ 0, 1, 2, 2, 3, 0 };
 
-const UniformBuffer = extern struct {
+const UniformBufferObject = extern struct {
     model: zlm.Mat4,
     view: zlm.Mat4,
     proj: zlm.Mat4,
@@ -127,6 +135,7 @@ const enable_validation_layers = switch (builtin.mode) {
 };
 
 pub fn run(self: *Self) !void {
+    self.start_time = try std.time.Instant.now();
     try self.initWindow();
     try self.initVulkan();
     try self.mainLoop();
@@ -175,6 +184,9 @@ fn initVulkan(self: *Self) !void {
     try self.createCommandPool();
     try self.createVertexBuffer();
     try self.createIndexBuffer();
+    try self.createUniformBuffers();
+    try self.createDescriptorPool();
+    try self.createDescriptorSets();
     try self.createCommandBuffer();
     try self.createSyncObjects();
 }
@@ -799,6 +811,79 @@ fn createIndexBuffer(self: *Self) !void {
     self.dev.freeMemory(staging_buffer_memory, null);
 }
 
+fn createUniformBuffers(self: *Self) !void {
+    const buffer_size = @sizeOf(UniformBufferObject);
+
+    for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+        try self.createBuffer(
+            buffer_size,
+            .{
+                .uniform_buffer_bit = true,
+            },
+            .{
+                .host_visible_bit = true,
+                .host_coherent_bit = true,
+            },
+            &self.uniform_buffers[i],
+            &self.uniform_buffers_memory[i],
+        );
+
+        self.uniform_buffers_mapped[i] = try self.dev.mapMemory(
+            self.uniform_buffers_memory[i],
+            0,
+            buffer_size,
+            .{},
+        );
+    }
+}
+
+fn createDescriptorPool(self: *Self) !void {
+    const pool_size: vk.DescriptorPoolSize = .{
+        .type = .uniform_buffer,
+        .descriptor_count = MAX_FRAMES_IN_FLIGHT,
+    };
+
+    const pool_info: vk.DescriptorPoolCreateInfo = .{
+        .pool_size_count = 1,
+        .p_pool_sizes = @ptrCast(&pool_size),
+        .max_sets = MAX_FRAMES_IN_FLIGHT,
+    };
+
+    self.descriptor_pool = try self.dev.createDescriptorPool(&pool_info, null);
+}
+
+fn createDescriptorSets(self: *Self) !void {
+    var layouts: [MAX_FRAMES_IN_FLIGHT]vk.DescriptorSetLayout = @splat(.null_handle);
+    const alloc_info: vk.DescriptorSetAllocateInfo = .{
+        .descriptor_pool = self.descriptor_pool,
+        .descriptor_set_count = MAX_FRAMES_IN_FLIGHT,
+        .p_set_layouts = layouts[0..].ptr,
+    };
+
+    try self.dev.allocateDescriptorSets(&alloc_info, self.descriptor_sets[0..].ptr);
+
+    for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+        const buffer_info: vk.DescriptorBufferInfo = .{
+            .buffer = self.uniform_buffers[i],
+            .offset = 0,
+            .range = @sizeOf(UniformBufferObject),
+        };
+
+        const descriptor_write: vk.WriteDescriptorSet = .{
+            .dst_set = self.descriptor_sets[i],
+            .dst_binding = 0,
+            .dst_array_element = 0,
+            .descriptor_type = .uniform_buffer,
+            .descriptor_count = 1,
+            .p_buffer_info = @ptrCast(&buffer_info),
+            .p_image_info = ([_]vk.DescriptorImageInfo{})[0..].ptr,
+            .p_texel_buffer_view = ([_]vk.BufferView{})[0..].ptr,
+        };
+
+        self.dev.updateDescriptorSets(1, @ptrCast(&descriptor_write), 0, null);
+    }
+}
+
 fn copyBuffer(
     self: *Self,
     src_buffer: vk.Buffer,
@@ -986,7 +1071,7 @@ fn createGraphicsPipeline(self: *Self) !void {
         .polygon_mode = .fill,
         .line_width = 1.0,
         .cull_mode = .{ .back_bit = true },
-        .front_face = .clockwise,
+        .front_face = .counter_clockwise,
     };
 
     const multisampling: vk.PipelineMultisampleStateCreateInfo = .{
@@ -1216,6 +1301,17 @@ fn recordCommandBuffer(
 
     self.vkd.cmdSetScissor(command_buffer, 0, 1, @ptrCast(&scissor));
 
+    self.vkd.cmdBindDescriptorSets(
+        command_buffer,
+        .graphics,
+        self.pipeline_layout,
+        0,
+        1,
+        self.descriptor_sets[self.current_frame .. self.current_frame + 1].ptr,
+        0,
+        null,
+    );
+
     self.vkd.cmdDrawIndexed(command_buffer, @intCast(indices.len), 1, 0, 0, 0);
 
     self.vkd.cmdEndRenderPass(command_buffer);
@@ -1273,6 +1369,8 @@ fn drawFrame(self: *Self) !void {
 
     const singal_sempahores = [_]vk.Semaphore{self.render_finished_semaphores[self.current_frame]};
 
+    try self.updateUniformBuffer(self.current_frame);
+
     const submit_info: vk.SubmitInfo = .{
         .wait_semaphore_count = 1,
         .p_wait_semaphores = wait_semaphores[0..].ptr,
@@ -1318,6 +1416,28 @@ fn drawFrame(self: *Self) !void {
     self.current_frame = (self.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
 }
 
+fn updateUniformBuffer(self: *Self, current_image: usize) !void {
+    const current_time = try std.time.Instant.now();
+
+    const time: f32 = @as(f32, @floatFromInt(current_time.since(self.start_time))) / @as(f32, @floatFromInt(std.time.ms_per_s));
+
+    var ubo: UniformBufferObject = .{
+        .model = zlm.Mat4.createAngleAxis(.unitZ, time * zlm.toRadians(90.0)),
+        .view = .createLookAt(.all(2.0), .zero, .unitZ),
+        .proj = .createPerspective(
+            zlm.toRadians(45.0),
+            @as(f32, @floatFromInt(self.swapchain_extent.width)) / @as(f32, @floatFromInt(self.swapchain_extent.height)),
+            0.1,
+            10.0,
+        ),
+    };
+
+    ubo.proj.fields[1][1] *= -1;
+
+    const dest: *UniformBufferObject = @ptrCast(@alignCast(self.uniform_buffers_mapped[current_image].?));
+    dest.* = ubo;
+}
+
 fn recreateSwapChain(self: *Self) !void {
     var width: c_int = 0;
     var height: c_int = 0;
@@ -1352,6 +1472,15 @@ fn creanupSwapChain(self: *Self) void {
 
 fn cleanup(self: *Self) void {
     self.creanupSwapChain();
+
+    for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+        self.dev.destroyBuffer(self.uniform_buffers[i], null);
+        self.dev.freeMemory(self.uniform_buffers_memory[i], null);
+    }
+
+    self.dev.destroyDescriptorPool(self.descriptor_pool, null);
+
+    self.dev.destroyDescriptorSetLayout(self.descriptor_set_layout, null);
 
     self.dev.destroyBuffer(self.index_buffer, null);
     self.dev.freeMemory(self.index_buffer_memory, null);
