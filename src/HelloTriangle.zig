@@ -30,6 +30,7 @@ swapchain_image_views: std.ArrayList(vk.ImageView) = .empty,
 swapchain_framebuffers: std.ArrayList(vk.Framebuffer) = .empty,
 
 render_pass: vk.RenderPass = .null_handle,
+descriptor_set_layout: vk.DescriptorSetLayout = .null_handle,
 pipeline_layout: vk.PipelineLayout = .null_handle,
 graphics_pipeline: vk.Pipeline = .null_handle,
 
@@ -884,7 +885,23 @@ fn findMemoryType(self: *Self, type_filter: u32, properties: vk.MemoryPropertyFl
 }
 
 fn createDescriptorSetLayout(self: *Self) !void {
-    const ubo_layout_binding: vkl.Desc
+    const ubo_layout_binding: vk.DescriptorSetLayoutBinding = .{
+        .binding = 0,
+        .descriptor_type = .uniform_buffer,
+        .descriptor_count = 1,
+        .stage_flags = .{ .vertex_bit = true },
+        .p_immutable_samplers = null,
+    };
+
+    const layout_info: vk.DescriptorSetLayoutCreateInfo = .{
+        .binding_count = 1,
+        .p_bindings = @ptrCast(&ubo_layout_binding),
+    };
+
+    self.descriptor_set_layout = try self.dev.createDescriptorSetLayout(
+        &layout_info,
+        null,
+    );
 }
 
 fn createGraphicsPipeline(self: *Self) !void {
@@ -1004,9 +1021,15 @@ fn createGraphicsPipeline(self: *Self) !void {
         .blend_constants = @splat(0.0),
     };
 
-    const pipeline_layout_info: vk.PipelineLayoutCreateInfo = .{};
+    const pipeline_layout_info: vk.PipelineLayoutCreateInfo = .{
+        .set_layout_count = 1,
+        .p_set_layouts = @ptrCast(&self.descriptor_set_layout),
+    };
 
-    self.pipeline_layout = try self.dev.createPipelineLayout(&pipeline_layout_info, null);
+    self.pipeline_layout = try self.dev.createPipelineLayout(
+        &pipeline_layout_info,
+        null,
+    );
 
     const pipeline_info: vk.GraphicsPipelineCreateInfo = .{
         .stage_count = 2,
