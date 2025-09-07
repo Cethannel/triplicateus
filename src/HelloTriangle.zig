@@ -36,6 +36,11 @@ graphics_pipeline: vk.Pipeline = .null_handle,
 command_pool: vk.CommandPool = .null_handle,
 command_buffers: [MAX_FRAMES_IN_FLIGHT]vk.CommandBuffer = @splat(.null_handle),
 
+vertex_buffer: vk.Buffer = .null_handle,
+vertex_buffer_memory: vk.DeviceMemory = .null_handle,
+index_buffer: vk.Buffer = .null_handle,
+index_buffer_memory: vk.DeviceMemory = .null_handle,
+
 vkb: BaseWrapper = undefined,
 vki: InstanceWrapper = undefined,
 vkd: DeviceWrapper = undefined,
@@ -50,6 +55,45 @@ frame_buffer_resized: bool = false,
 current_frame: usize = 0,
 
 const Self = @This();
+
+const Vertex = extern struct {
+    pos: zlm.Vec2,
+    color: zlm.Vec3,
+
+    pub fn getBindingDescription() vk.VertexInputBindingDescription {
+        return vk.VertexInputBindingDescription{
+            .binding = 0,
+            .stride = @sizeOf(@This()),
+            .input_rate = .vertex,
+        };
+    }
+
+    pub fn getAttributeDescriptions() [2]vk.VertexInputAttributeDescription {
+        return [2]vk.VertexInputAttributeDescription{
+            vk.VertexInputAttributeDescription{
+                .binding = 0,
+                .location = 0,
+                .format = .r32g32_sfloat,
+                .offset = @offsetOf(@This(), "pos"),
+            },
+            vk.VertexInputAttributeDescription{
+                .binding = 0,
+                .location = 1,
+                .format = .r32g32b32_sfloat,
+                .offset = @offsetOf(@This(), "color"),
+            },
+        };
+    }
+};
+
+const vertices = [_]Vertex{
+    .{ .pos = .new(-0.5, -0.5), .color = .new(1.0, 0.0, 0.0) },
+    .{ .pos = .new(0.5, -0.5), .color = .new(0.0, 1.0, 0.0) },
+    .{ .pos = .new(0.5, 0.5), .color = .new(0.0, 0.0, 1.0) },
+    .{ .pos = .new(-0.5, 0.5), .color = .new(1.0, 1.0, 1.0) },
+};
+
+const indices = [_]u16{ 0, 1, 2, 2, 3, 0 };
 
 const WIDTH = 800;
 const HEIGHT = 600;
@@ -121,6 +165,8 @@ fn initVulkan(self: *Self) !void {
     try self.createGraphicsPipeline();
     try self.createFramebuffers();
     try self.createCommandPool();
+    try self.createVertexBuffer();
+    try self.createIndexBuffer();
     try self.createCommandBuffer();
     try self.createSyncObjects();
 }
@@ -317,7 +363,7 @@ const QueueFamilies = struct {
 };
 
 fn findQueueFamilies(self: *const Self, device: vk.PhysicalDevice) !QueueFamilies {
-    var indices = QueueFamilies{};
+    var queue_indices = QueueFamilies{};
 
     var queue_family_count: u32 = 0;
     self.vki.getPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, null);
@@ -330,25 +376,25 @@ fn findQueueFamilies(self: *const Self, device: vk.PhysicalDevice) !QueueFamilie
 
     for (queue_families) |queue_family| {
         if (queue_family.queue_flags.graphics_bit) {
-            indices.graphics_family = i;
+            queue_indices.graphics_family = i;
         }
 
         if (try self.vki.getPhysicalDeviceSurfaceSupportKHR(device, i, self.surface) == .true) {
-            indices.present_family = i;
+            queue_indices.present_family = i;
         }
 
-        if (indices.is_complete()) {
+        if (queue_indices.is_complete()) {
             break;
         }
 
         i += 1;
     }
 
-    return indices;
+    return queue_indices;
 }
 
 fn isDeviceSuitable(self: *const Self, device: vk.PhysicalDevice) !bool {
-    var indices = try self.findQueueFamilies(device);
+    var queue_indices = try self.findQueueFamilies(device);
 
     const extensionsSupported = try self.checkDeviceExtensionSupport(device);
 
@@ -360,7 +406,7 @@ fn isDeviceSuitable(self: *const Self, device: vk.PhysicalDevice) !bool {
             (swapChainSupport.present_modes.items.len != 0);
     }
 
-    return swapChainAdaquate and extensionsSupported and indices.is_complete();
+    return swapChainAdaquate and extensionsSupported and queue_indices.is_complete();
 }
 
 fn checkDeviceExtensionSupport(self: *const Self, device: vk.PhysicalDevice) !bool {
@@ -428,13 +474,13 @@ fn rateDeviceSuitablility(self: *const Self, device: vk.PhysicalDevice) i32 {
 }
 
 fn createLogicalDevice(self: *Self) !void {
-    const indices = try self.findQueueFamilies(self.physical_device);
+    const queue_indices = try self.findQueueFamilies(self.physical_device);
 
     var queue_create_infos = std.AutoArrayHashMap(u32, vk.DeviceQueueCreateInfo).init(self.allocator);
 
     const queue_priority: f32 = 1.0;
     inline for (std.meta.fields(QueueFamilies)) |field| {
-        const queue_family: u32 = @field(indices, field.name).?;
+        const queue_family: u32 = @field(queue_indices, field.name).?;
         if (!queue_create_infos.contains(queue_family)) {
             const queue_create_info: vk.DeviceQueueCreateInfo = .{
                 .queue_family_index = queue_family,
@@ -466,8 +512,8 @@ fn createLogicalDevice(self: *Self) !void {
     self.vkd = DeviceWrapper.load(self.device, self.vki.dispatch.vkGetDeviceProcAddr.?);
     self.dev = Device.init(self.device, &self.vkd);
 
-    self.graphics_queue = self.vkd.getDeviceQueue(self.device, indices.graphics_family.?, 0);
-    self.present_queue = self.vkd.getDeviceQueue(self.device, indices.present_family.?, 0);
+    self.graphics_queue = self.vkd.getDeviceQueue(self.device, queue_indices.graphics_family.?, 0);
+    self.present_queue = self.vkd.getDeviceQueue(self.device, queue_indices.present_family.?, 0);
 }
 
 fn createSurface(self: *Self) !void {
@@ -623,10 +669,10 @@ fn createSwapChain(self: *Self) !void {
         .old_swapchain = .null_handle,
     };
 
-    const indices = try self.findQueueFamilies(self.physical_device);
-    var queue_family_indices = [_]u32{ indices.graphics_family.?, indices.present_family.? };
+    const queue_indices = try self.findQueueFamilies(self.physical_device);
+    var queue_family_indices = [_]u32{ queue_indices.graphics_family.?, queue_indices.present_family.? };
 
-    if (indices.graphics_family != indices.present_family) {
+    if (queue_indices.graphics_family != queue_indices.present_family) {
         create_info.image_sharing_mode = .concurrent;
         create_info.queue_family_index_count = 2;
         create_info.p_queue_family_indices = queue_family_indices[0..].ptr;
@@ -673,6 +719,163 @@ fn createImageViews(self: *Self) !void {
     }
 }
 
+fn createVertexBuffer(self: *Self) !void {
+    const buffer_size: vk.DeviceSize = @sizeOf(Vertex) * vertices.len;
+
+    var staging_buffer: vk.Buffer = .null_handle;
+    var staging_buffer_memory: vk.DeviceMemory = .null_handle;
+
+    try self.createBuffer(
+        buffer_size,
+        .{ .transfer_src_bit = true },
+        .{ .host_visible_bit = true, .host_coherent_bit = true },
+        &staging_buffer,
+        &staging_buffer_memory,
+    );
+
+    const data = try self.dev.mapMemory(staging_buffer_memory, 0, buffer_size, .{});
+    const data_arr: *@TypeOf(vertices) = @ptrCast(@alignCast(data.?));
+    @memcpy(data_arr, vertices[0..]);
+    self.dev.unmapMemory(staging_buffer_memory);
+
+    try self.createBuffer(
+        buffer_size,
+        .{
+            .vertex_buffer_bit = true,
+            .transfer_dst_bit = true,
+        },
+        .{ .device_local_bit = true },
+        &self.vertex_buffer,
+        &self.vertex_buffer_memory,
+    );
+
+    try self.copyBuffer(staging_buffer, self.vertex_buffer, buffer_size);
+
+    self.dev.destroyBuffer(staging_buffer, null);
+    self.dev.freeMemory(staging_buffer_memory, null);
+}
+
+fn createIndexBuffer(self: *Self) !void {
+    const buffer_size: vk.DeviceSize = @sizeOf(u16) * indices.len;
+
+    var staging_buffer: vk.Buffer = .null_handle;
+    var staging_buffer_memory: vk.DeviceMemory = .null_handle;
+
+    try self.createBuffer(
+        buffer_size,
+        .{ .transfer_src_bit = true },
+        .{ .host_visible_bit = true, .host_coherent_bit = true },
+        &staging_buffer,
+        &staging_buffer_memory,
+    );
+
+    const data = try self.dev.mapMemory(staging_buffer_memory, 0, buffer_size, .{});
+    const data_arr: *@TypeOf(indices) = @ptrCast(@alignCast(data.?));
+    @memcpy(data_arr, indices[0..]);
+    self.dev.unmapMemory(staging_buffer_memory);
+
+    try self.createBuffer(
+        buffer_size,
+        .{
+            .index_buffer_bit = true,
+            .transfer_dst_bit = true,
+        },
+        .{ .device_local_bit = true },
+        &self.index_buffer,
+        &self.index_buffer_memory,
+    );
+
+    try self.copyBuffer(staging_buffer, self.index_buffer, buffer_size);
+
+    self.dev.destroyBuffer(staging_buffer, null);
+    self.dev.freeMemory(staging_buffer_memory, null);
+}
+
+fn copyBuffer(
+    self: *Self,
+    src_buffer: vk.Buffer,
+    dst_buffer: vk.Buffer,
+    size: vk.DeviceSize,
+) !void {
+    const alloc_info: vk.CommandBufferAllocateInfo = .{
+        .level = .primary,
+        .command_pool = self.command_pool,
+        .command_buffer_count = 1,
+    };
+
+    var command_buffer: vk.CommandBuffer = .null_handle;
+    try self.dev.allocateCommandBuffers(&alloc_info, @ptrCast(&command_buffer));
+    defer self.dev.freeCommandBuffers(self.command_pool, 1, @ptrCast(&command_buffer));
+
+    const begin_info: vk.CommandBufferBeginInfo = .{
+        .flags = .{ .one_time_submit_bit = true },
+    };
+
+    try self.vkd.beginCommandBuffer(command_buffer, &begin_info);
+
+    const copy_region: vk.BufferCopy = .{
+        .src_offset = 0,
+        .dst_offset = 0,
+        .size = size,
+    };
+
+    self.vkd.cmdCopyBuffer(command_buffer, src_buffer, dst_buffer, 1, @ptrCast(&copy_region));
+
+    try self.vkd.endCommandBuffer(command_buffer);
+
+    const submit_info: vk.SubmitInfo = .{
+        .command_buffer_count = 1,
+        .p_command_buffers = @ptrCast(&command_buffer),
+    };
+
+    try self.vkd.queueSubmit(self.graphics_queue, 1, @ptrCast(&submit_info), .null_handle);
+    try self.vkd.queueWaitIdle(self.graphics_queue);
+}
+
+fn createBuffer(
+    self: *Self,
+    size: vk.DeviceSize,
+    usage: vk.BufferUsageFlags,
+    properties: vk.MemoryPropertyFlags,
+    buffer: *vk.Buffer,
+    buffer_memory: *vk.DeviceMemory,
+) !void {
+    const buffer_info: vk.BufferCreateInfo = .{
+        .size = size,
+        .usage = usage,
+        .sharing_mode = .exclusive,
+    };
+
+    buffer.* = try self.dev.createBuffer(&buffer_info, null);
+
+    const mem_requirements = self.dev.getBufferMemoryRequirements(buffer.*);
+
+    const alloc_info: vk.MemoryAllocateInfo = .{
+        .allocation_size = mem_requirements.size,
+        .memory_type_index = try self.findMemoryType(mem_requirements.memory_type_bits, properties),
+    };
+
+    buffer_memory.* = try self.dev.allocateMemory(&alloc_info, null);
+
+    try self.dev.bindBufferMemory(buffer.*, buffer_memory.*, 0);
+}
+
+fn findMemoryType(self: *Self, type_filter: u32, properties: vk.MemoryPropertyFlags) !u32 {
+    const mem_properties = self.vki.getPhysicalDeviceMemoryProperties(self.physical_device);
+
+    for (0..mem_properties.memory_type_count) |i| {
+        if (type_filter & (@as(u32, 1) << @intCast(i)) != 0 and //
+            @as(u32, @bitCast(mem_properties.memory_types[i].property_flags)) //
+            & @as(u32, @bitCast(properties)) == @as(u32, @bitCast(properties)))
+        {
+            return @intCast(i);
+        }
+    }
+
+    std.log.err("Failed to find suitable memory type", .{});
+    return error.NoSuitableMemoryType;
+}
+
 fn createGraphicsPipeline(self: *Self) !void {
     const vertex_shader align(4) = @embedFile("vertex_shader").*;
     const fragment_shader align(4) = @embedFile("fragment_shader").*;
@@ -709,11 +912,14 @@ fn createGraphicsPipeline(self: *Self) !void {
         .p_dynamic_states = dynamic_states[0..].ptr,
     };
 
+    const binding_description = Vertex.getBindingDescription();
+    const attribute_description = Vertex.getAttributeDescriptions();
+
     const vertex_input_info: vk.PipelineVertexInputStateCreateInfo = .{
-        .vertex_binding_description_count = 0,
-        .p_vertex_binding_descriptions = null,
-        .vertex_attribute_description_count = 0,
-        .p_vertex_attribute_descriptions = null,
+        .vertex_binding_description_count = 1,
+        .p_vertex_binding_descriptions = @ptrCast(&binding_description),
+        .vertex_attribute_description_count = attribute_description.len,
+        .p_vertex_attribute_descriptions = attribute_description[0..].ptr,
     };
 
     const input_assembly: vk.PipelineInputAssemblyStateCreateInfo = .{
@@ -945,6 +1151,19 @@ fn recordCommandBuffer(
 
     self.vkd.cmdBindPipeline(command_buffer, .graphics, self.graphics_pipeline);
 
+    const vertex_buffers = [_]vk.Buffer{self.vertex_buffer};
+    const offsets = [_]vk.DeviceSize{0};
+
+    self.vkd.cmdBindVertexBuffers(
+        command_buffer,
+        0,
+        1,
+        vertex_buffers[0..].ptr,
+        offsets[0..].ptr,
+    );
+
+    self.vkd.cmdBindIndexBuffer(command_buffer, self.index_buffer, 0, .uint16);
+
     const viewport: vk.Viewport = .{
         .x = 0.0,
         .y = 0.0,
@@ -963,7 +1182,7 @@ fn recordCommandBuffer(
 
     self.vkd.cmdSetScissor(command_buffer, 0, 1, @ptrCast(&scissor));
 
-    self.vkd.cmdDraw(command_buffer, 3, 1, 0, 0);
+    self.vkd.cmdDrawIndexed(command_buffer, @intCast(indices.len), 1, 0, 0, 0);
 
     self.vkd.cmdEndRenderPass(command_buffer);
 
@@ -1099,6 +1318,12 @@ fn creanupSwapChain(self: *Self) void {
 
 fn cleanup(self: *Self) void {
     self.creanupSwapChain();
+
+    self.dev.destroyBuffer(self.index_buffer, null);
+    self.dev.freeMemory(self.index_buffer_memory, null);
+
+    self.dev.destroyBuffer(self.vertex_buffer, null);
+    self.dev.freeMemory(self.vertex_buffer_memory, null);
 
     self.dev.destroyPipeline(self.graphics_pipeline, null);
     self.dev.destroyPipelineLayout(self.pipeline_layout, null);
