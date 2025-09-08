@@ -53,6 +53,7 @@ pub fn build(b: *std.Build) void {
     });
     const zlm = b.dependency("zlm", default_args);
     const zglfw = b.dependency("zglfw", default_args);
+    const zignal = b.dependency("zignal", default_args);
 
     const vert_cmd = b.addSystemCommand(&.{
         "glslc",
@@ -93,6 +94,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "vulkan", .module = vulkan.module("vulkan-zig") },
             .{ .name = "zlm", .module = zlm.module("zlm") },
             .{ .name = "glfw", .module = zglfw.module("glfw") },
+            .{ .name = "zignal", .module = zignal.module("zignal") },
         },
     });
 

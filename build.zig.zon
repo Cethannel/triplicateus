@@ -48,6 +48,10 @@
             .url = "https://github.com/KhronosGroup/Vulkan-Headers/archive/v1.3.283.tar.gz",
             .hash = "N-V-__8AAAkkoQGn5z1yoNVrwqZfnYmZp8AZ5CJgoHRMQI0c",
         },
+        .zignal = .{
+            .url = "git+https://github.com/bfactory-ai/zignal#ab505e489ee674bb8ace89253e6f612c1004c2d3",
+            .hash = "zignal-0.5.0-dev-OrZ3s2qyFACCwhi09PlDsKPUHpJDOhFFA0-KRurBqaoV",
+        },
     },
     .paths = .{
         "build.zig",

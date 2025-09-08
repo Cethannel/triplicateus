@@ -2,6 +2,7 @@ const std = @import("std");
 const vk = @import("vulkan");
 const glfw = @import("glfw");
 const zlm = @import("zlm");
+const zignal = @import("zignal");
 
 const builtin = @import("builtin");
 
@@ -48,6 +49,11 @@ uniform_buffers: [MAX_FRAMES_IN_FLIGHT]vk.Buffer = @splat(.null_handle),
 uniform_buffers_memory: [MAX_FRAMES_IN_FLIGHT]vk.DeviceMemory = @splat(.null_handle),
 uniform_buffers_mapped: [MAX_FRAMES_IN_FLIGHT]?*anyopaque = @splat(null),
 
+texture_image: vk.Image = .null_handle,
+texture_image_memory: vk.DeviceMemory = .null_handle,
+texture_image_view: vk.ImageView = .null_handle,
+texture_image_sampler: vk.Sampler = .null_handle,
+
 vkb: BaseWrapper = undefined,
 vki: InstanceWrapper = undefined,
 vkd: DeviceWrapper = undefined,
@@ -68,6 +74,7 @@ const Self = @This();
 const Vertex = extern struct {
     pos: zlm.Vec2,
     color: zlm.Vec3,
+    tex_coord: zlm.Vec2,
 
     pub fn getBindingDescription() vk.VertexInputBindingDescription {
         return vk.VertexInputBindingDescription{
@@ -77,8 +84,8 @@ const Vertex = extern struct {
         };
     }
 
-    pub fn getAttributeDescriptions() [2]vk.VertexInputAttributeDescription {
-        return [2]vk.VertexInputAttributeDescription{
+    pub fn getAttributeDescriptions() [3]vk.VertexInputAttributeDescription {
+        return [3]vk.VertexInputAttributeDescription{
             vk.VertexInputAttributeDescription{
                 .binding = 0,
                 .location = 0,
@@ -91,23 +98,29 @@ const Vertex = extern struct {
                 .format = .r32g32b32_sfloat,
                 .offset = @offsetOf(@This(), "color"),
             },
+            vk.VertexInputAttributeDescription{
+                .binding = 0,
+                .location = 2,
+                .format = .r32g32_sfloat,
+                .offset = @offsetOf(@This(), "tex_coord"),
+            },
         };
     }
 };
 
 const vertices = [_]Vertex{
-    .{ .pos = .new(-0.5, -0.5), .color = .new(1.0, 0.0, 0.0) },
-    .{ .pos = .new(0.5, -0.5), .color = .new(0.0, 1.0, 0.0) },
-    .{ .pos = .new(0.5, 0.5), .color = .new(0.0, 0.0, 1.0) },
-    .{ .pos = .new(-0.5, 0.5), .color = .new(1.0, 1.0, 1.0) },
+    .{ .pos = .new(-0.5, -0.5), .color = .new(1.0, 0.0, 0.0), .tex_coord = .new(1.0, 0.0) },
+    .{ .pos = .new(0.5, -0.5), .color = .new(0.0, 1.0, 0.0), .tex_coord = .new(0.0, 0.0) },
+    .{ .pos = .new(0.5, 0.5), .color = .new(0.0, 0.0, 1.0), .tex_coord = .new(0.0, 1.0) },
+    .{ .pos = .new(-0.5, 0.5), .color = .new(1.0, 1.0, 1.0), .tex_coord = .new(1.0, 1.0) },
 };
 
 const indices = [_]u16{ 0, 1, 2, 2, 3, 0 };
 
 const UniformBufferObject = extern struct {
-    model: zlm.Mat4,
-    view: zlm.Mat4,
-    proj: zlm.Mat4,
+    model: zlm.Mat4 align(16),
+    view: zlm.Mat4 align(16),
+    proj: zlm.Mat4 align(16),
 };
 
 const WIDTH = 800;
@@ -182,6 +195,9 @@ fn initVulkan(self: *Self) !void {
     try self.createGraphicsPipeline();
     try self.createFramebuffers();
     try self.createCommandPool();
+    try self.createTextureImage();
+    try self.createTextureImageView();
+    try self.createTextureSampler();
     try self.createVertexBuffer();
     try self.createIndexBuffer();
     try self.createUniformBuffers();
@@ -426,7 +442,12 @@ fn isDeviceSuitable(self: *const Self, device: vk.PhysicalDevice) !bool {
             (swapChainSupport.present_modes.items.len != 0);
     }
 
-    return swapChainAdaquate and extensionsSupported and queue_indices.is_complete();
+    const supported_features = self.vki.getPhysicalDeviceFeatures(device);
+
+    return swapChainAdaquate //
+    and extensionsSupported //
+    and queue_indices.is_complete() //
+    and supported_features.sampler_anisotropy == .true;
 }
 
 fn checkDeviceExtensionSupport(self: *const Self, device: vk.PhysicalDevice) !bool {
@@ -511,7 +532,10 @@ fn createLogicalDevice(self: *Self) !void {
         }
     }
 
-    const device_features: vk.PhysicalDeviceFeatures = .{};
+    const device_features: vk.PhysicalDeviceFeatures = .{
+        .sampler_anisotropy = .true,
+    };
+
     var create_info: vk.DeviceCreateInfo = .{
         .p_queue_create_infos = queue_create_infos.values().ptr,
         .queue_create_info_count = @intCast(queue_create_infos.values().len),
@@ -716,26 +740,7 @@ fn createImageViews(self: *Self) !void {
     errdefer self.swapchain_image_views.deinit(self.allocator);
 
     for (self.swapchain_images.items, 0..) |image, i| {
-        const create_info: vk.ImageViewCreateInfo = .{
-            .image = image,
-            .view_type = .@"2d",
-            .format = self.swapchain_image_format,
-            .components = .{
-                .r = .identity,
-                .g = .identity,
-                .b = .identity,
-                .a = .identity,
-            },
-            .subresource_range = .{
-                .aspect_mask = .{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            },
-        };
-
-        self.swapchain_image_views.items[i] = try self.dev.createImageView(&create_info, null);
+        self.swapchain_image_views.items[i] = try self.createImageView(image, self.swapchain_image_format);
     }
 }
 
@@ -773,6 +778,105 @@ fn createVertexBuffer(self: *Self) !void {
 
     self.dev.destroyBuffer(staging_buffer, null);
     self.dev.freeMemory(staging_buffer_memory, null);
+}
+
+fn transitionImageLayout(
+    self: *Self,
+    image: vk.Image,
+    format: vk.Format,
+    old_layout: vk.ImageLayout,
+    new_layout: vk.ImageLayout,
+) !void {
+    _ = format; // autofix
+    const command_buffer = try self.beginSingleTimeCommands();
+
+    var barrier: vk.ImageMemoryBarrier = .{
+        .old_layout = old_layout,
+        .new_layout = new_layout,
+        .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+        .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+        .image = image,
+        .subresource_range = .{
+            .aspect_mask = .{ .color_bit = true },
+            .base_mip_level = 0,
+            .level_count = 1,
+            .base_array_layer = 0,
+            .layer_count = 1,
+        },
+        .src_access_mask = undefined,
+        .dst_access_mask = undefined,
+    };
+
+    var source_stage: vk.PipelineStageFlags = .{};
+    var destination_stage: vk.PipelineStageFlags = .{};
+
+    if (old_layout == .undefined and new_layout == .transfer_dst_optimal) {
+        barrier.src_access_mask = .{};
+        barrier.dst_access_mask = .{ .transfer_write_bit = true };
+
+        source_stage = .{ .top_of_pipe_bit = true };
+        destination_stage = .{ .transfer_bit = true };
+    } else if (old_layout == .transfer_dst_optimal and new_layout == .shader_read_only_optimal) {
+        barrier.src_access_mask = .{ .transfer_write_bit = true };
+        barrier.dst_access_mask = .{ .shader_read_bit = true };
+
+        source_stage = .{ .transfer_bit = true };
+        destination_stage = .{ .fragment_shader_bit = true };
+    } else {
+        unreachable;
+    }
+
+    self.vkd.cmdPipelineBarrier(
+        command_buffer,
+        source_stage,
+        destination_stage,
+        .{},
+        0,
+        null,
+        0,
+        null,
+        1,
+        @ptrCast(&barrier),
+    );
+
+    try self.endSingleTimeCommands(command_buffer);
+}
+
+fn copyBufferToImage(
+    self: *Self,
+    buffer: vk.Buffer,
+    image: vk.Image,
+    width: u32,
+    height: u32,
+) !void {
+    const command_buffer = try self.beginSingleTimeCommands();
+
+    const region: vk.BufferImageCopy = .{
+        .buffer_offset = 0,
+        .buffer_row_length = 0,
+        .buffer_image_height = 0,
+
+        .image_subresource = .{
+            .aspect_mask = .{ .color_bit = true },
+            .mip_level = 0,
+            .base_array_layer = 0,
+            .layer_count = 1,
+        },
+
+        .image_offset = .{ .x = 0, .y = 0, .z = 0 },
+        .image_extent = .{ .width = width, .height = height, .depth = 1 },
+    };
+
+    self.vkd.cmdCopyBufferToImage(
+        command_buffer,
+        buffer,
+        image,
+        .transfer_dst_optimal,
+        1,
+        @ptrCast(&region),
+    );
+
+    try self.endSingleTimeCommands(command_buffer);
 }
 
 fn createIndexBuffer(self: *Self) !void {
@@ -838,14 +942,20 @@ fn createUniformBuffers(self: *Self) !void {
 }
 
 fn createDescriptorPool(self: *Self) !void {
-    const pool_size: vk.DescriptorPoolSize = .{
-        .type = .uniform_buffer,
-        .descriptor_count = MAX_FRAMES_IN_FLIGHT,
+    const pool_sizes = [2]vk.DescriptorPoolSize{
+        .{
+            .type = .uniform_buffer,
+            .descriptor_count = MAX_FRAMES_IN_FLIGHT,
+        },
+        .{
+            .type = .combined_image_sampler,
+            .descriptor_count = MAX_FRAMES_IN_FLIGHT,
+        },
     };
 
     const pool_info: vk.DescriptorPoolCreateInfo = .{
-        .pool_size_count = 1,
-        .p_pool_sizes = @ptrCast(&pool_size),
+        .pool_size_count = pool_sizes.len,
+        .p_pool_sizes = pool_sizes[0..].ptr,
         .max_sets = MAX_FRAMES_IN_FLIGHT,
     };
 
@@ -853,7 +963,7 @@ fn createDescriptorPool(self: *Self) !void {
 }
 
 fn createDescriptorSets(self: *Self) !void {
-    var layouts: [MAX_FRAMES_IN_FLIGHT]vk.DescriptorSetLayout = @splat(.null_handle);
+    var layouts: [MAX_FRAMES_IN_FLIGHT]vk.DescriptorSetLayout = @splat(self.descriptor_set_layout);
     const alloc_info: vk.DescriptorSetAllocateInfo = .{
         .descriptor_pool = self.descriptor_pool,
         .descriptor_set_count = MAX_FRAMES_IN_FLIGHT,
@@ -869,18 +979,41 @@ fn createDescriptorSets(self: *Self) !void {
             .range = @sizeOf(UniformBufferObject),
         };
 
-        const descriptor_write: vk.WriteDescriptorSet = .{
-            .dst_set = self.descriptor_sets[i],
-            .dst_binding = 0,
-            .dst_array_element = 0,
-            .descriptor_type = .uniform_buffer,
-            .descriptor_count = 1,
-            .p_buffer_info = @ptrCast(&buffer_info),
-            .p_image_info = ([_]vk.DescriptorImageInfo{})[0..].ptr,
-            .p_texel_buffer_view = ([_]vk.BufferView{})[0..].ptr,
+        const image_info: vk.DescriptorImageInfo = .{
+            .image_layout = .shader_read_only_optimal,
+            .image_view = self.texture_image_view,
+            .sampler = self.texture_image_sampler,
         };
 
-        self.dev.updateDescriptorSets(1, @ptrCast(&descriptor_write), 0, null);
+        const descriptor_writes = [_]vk.WriteDescriptorSet{
+            .{
+                .dst_set = self.descriptor_sets[i],
+                .dst_binding = 0,
+                .dst_array_element = 0,
+                .descriptor_type = .uniform_buffer,
+                .descriptor_count = 1,
+                .p_buffer_info = @ptrCast(&buffer_info),
+                .p_image_info = ([_]vk.DescriptorImageInfo{})[0..].ptr,
+                .p_texel_buffer_view = ([_]vk.BufferView{})[0..].ptr,
+            },
+            .{
+                .dst_set = self.descriptor_sets[i],
+                .dst_binding = 1,
+                .dst_array_element = 0,
+                .descriptor_type = .combined_image_sampler,
+                .descriptor_count = 1,
+                .p_buffer_info = ([_]vk.DescriptorBufferInfo{})[0..].ptr,
+                .p_image_info = @ptrCast(&image_info),
+                .p_texel_buffer_view = ([_]vk.BufferView{})[0..].ptr,
+            },
+        };
+
+        self.dev.updateDescriptorSets(
+            @intCast(descriptor_writes.len),
+            descriptor_writes[0..].ptr,
+            0,
+            null,
+        );
     }
 }
 
@@ -890,21 +1023,7 @@ fn copyBuffer(
     dst_buffer: vk.Buffer,
     size: vk.DeviceSize,
 ) !void {
-    const alloc_info: vk.CommandBufferAllocateInfo = .{
-        .level = .primary,
-        .command_pool = self.command_pool,
-        .command_buffer_count = 1,
-    };
-
-    var command_buffer: vk.CommandBuffer = .null_handle;
-    try self.dev.allocateCommandBuffers(&alloc_info, @ptrCast(&command_buffer));
-    defer self.dev.freeCommandBuffers(self.command_pool, 1, @ptrCast(&command_buffer));
-
-    const begin_info: vk.CommandBufferBeginInfo = .{
-        .flags = .{ .one_time_submit_bit = true },
-    };
-
-    try self.vkd.beginCommandBuffer(command_buffer, &begin_info);
+    const command_buffer = try self.beginSingleTimeCommands();
 
     const copy_region: vk.BufferCopy = .{
         .src_offset = 0,
@@ -914,15 +1033,7 @@ fn copyBuffer(
 
     self.vkd.cmdCopyBuffer(command_buffer, src_buffer, dst_buffer, 1, @ptrCast(&copy_region));
 
-    try self.vkd.endCommandBuffer(command_buffer);
-
-    const submit_info: vk.SubmitInfo = .{
-        .command_buffer_count = 1,
-        .p_command_buffers = @ptrCast(&command_buffer),
-    };
-
-    try self.vkd.queueSubmit(self.graphics_queue, 1, @ptrCast(&submit_info), .null_handle);
-    try self.vkd.queueWaitIdle(self.graphics_queue);
+    try self.endSingleTimeCommands(command_buffer);
 }
 
 fn createBuffer(
@@ -978,9 +1089,19 @@ fn createDescriptorSetLayout(self: *Self) !void {
         .p_immutable_samplers = null,
     };
 
+    const sampler_layout_binding: vk.DescriptorSetLayoutBinding = .{
+        .binding = 1,
+        .descriptor_count = 1,
+        .descriptor_type = .combined_image_sampler,
+        .p_immutable_samplers = null,
+        .stage_flags = .{ .fragment_bit = true },
+    };
+
+    const bindings = [_]vk.DescriptorSetLayoutBinding{ ubo_layout_binding, sampler_layout_binding };
+
     const layout_info: vk.DescriptorSetLayoutCreateInfo = .{
-        .binding_count = 1,
-        .p_bindings = @ptrCast(&ubo_layout_binding),
+        .binding_count = @intCast(bindings.len),
+        .p_bindings = bindings[0..].ptr,
     };
 
     self.descriptor_set_layout = try self.dev.createDescriptorSetLayout(
@@ -1232,6 +1353,209 @@ fn createCommandPool(self: *Self) !void {
     self.command_pool = try self.dev.createCommandPool(&pool_info, null);
 }
 
+fn createTextureImage(self: *Self) !void {
+    var image = try zignal.jpeg.load(zignal.Rgba, self.allocator, "textures/texture.jpg");
+    defer image.deinit(self.allocator);
+
+    const tex_width = image.cols;
+    const tex_height = image.rows;
+
+    const image_size = tex_width * tex_height * 4;
+
+    var staging_buffer: vk.Buffer = .null_handle;
+    var staging_buffer_memory: vk.DeviceMemory = .null_handle;
+
+    try self.createBuffer(
+        image_size,
+        .{ .transfer_src_bit = true },
+        .{ .host_visible_bit = true, .host_coherent_bit = true },
+        &staging_buffer,
+        &staging_buffer_memory,
+    );
+
+    try self.copyData(u8, image.asBytes(), staging_buffer_memory, image_size);
+
+    try self.createImage(
+        @intCast(tex_width),
+        @intCast(tex_height),
+        .r8g8b8a8_srgb,
+        .optimal,
+        .{ .transfer_dst_bit = true, .sampled_bit = true },
+        .{ .device_local_bit = true },
+        &self.texture_image,
+        &self.texture_image_memory,
+    );
+
+    try self.transitionImageLayout(
+        self.texture_image,
+        .r8g8b8a8_srgb,
+        .undefined,
+        .transfer_dst_optimal,
+    );
+
+    try self.copyBufferToImage(
+        staging_buffer,
+        self.texture_image,
+        @intCast(tex_width),
+        @intCast(tex_height),
+    );
+
+    try self.transitionImageLayout(
+        self.texture_image,
+        .r8g8b8a8_srgb,
+        .transfer_dst_optimal,
+        .shader_read_only_optimal,
+    );
+
+    self.dev.destroyBuffer(staging_buffer, null);
+    self.dev.freeMemory(staging_buffer_memory, null);
+}
+
+fn createTextureImageView(self: *Self) !void {
+    self.texture_image_view = try self.createImageView(self.texture_image, .r8g8b8a8_srgb);
+}
+
+fn createTextureSampler(self: *Self) !void {
+    const properties = self.vki.getPhysicalDeviceProperties(self.physical_device);
+
+    const sampler_info: vk.SamplerCreateInfo = .{
+        .mag_filter = .linear,
+        .min_filter = .linear,
+        .address_mode_u = .repeat,
+        .address_mode_v = .repeat,
+        .address_mode_w = .repeat,
+        .anisotropy_enable = .true,
+        .max_anisotropy = properties.limits.max_sampler_anisotropy,
+        .border_color = .float_opaque_black,
+        .unnormalized_coordinates = .false,
+        .compare_enable = .false,
+        .compare_op = .always,
+        .mipmap_mode = .linear,
+        .mip_lod_bias = 0.0,
+        .min_lod = 0.0,
+        .max_lod = 0.0,
+    };
+
+    self.texture_image_sampler = try self.dev.createSampler(&sampler_info, null);
+}
+
+fn createImageView(self: *Self, image: vk.Image, format: vk.Format) !vk.ImageView {
+    const view_info: vk.ImageViewCreateInfo = .{
+        .image = image,
+        .view_type = .@"2d",
+        .format = format,
+        .subresource_range = .{
+            .aspect_mask = .{ .color_bit = true },
+            .base_mip_level = 0,
+            .level_count = 1,
+            .base_array_layer = 0,
+            .layer_count = 1,
+        },
+        .components = .{
+            .r = .identity,
+            .g = .identity,
+            .b = .identity,
+            .a = .identity,
+        },
+    };
+
+    return self.dev.createImageView(&view_info, null);
+}
+
+fn beginSingleTimeCommands(self: *Self) !vk.CommandBuffer {
+    const alloc_info: vk.CommandBufferAllocateInfo = .{
+        .level = .primary,
+        .command_pool = self.command_pool,
+        .command_buffer_count = 1,
+    };
+
+    var command_buffer: vk.CommandBuffer = .null_handle;
+    try self.dev.allocateCommandBuffers(&alloc_info, @ptrCast(&command_buffer));
+
+    const begin_info: vk.CommandBufferBeginInfo = .{
+        .flags = .{ .one_time_submit_bit = true },
+    };
+
+    try self.vkd.beginCommandBuffer(command_buffer, &begin_info);
+
+    return command_buffer;
+}
+
+fn endSingleTimeCommands(self: *Self, command_buffer: vk.CommandBuffer) !void {
+    try self.vkd.endCommandBuffer(command_buffer);
+
+    const submit_info: vk.SubmitInfo = .{
+        .command_buffer_count = 1,
+        .p_command_buffers = @ptrCast(&command_buffer),
+    };
+
+    try self.vkd.queueSubmit(self.graphics_queue, 1, @ptrCast(&submit_info), .null_handle);
+    try self.vkd.queueWaitIdle(self.graphics_queue);
+
+    self.dev.freeCommandBuffers(self.command_pool, 1, @ptrCast(&command_buffer));
+}
+
+fn createImage(
+    self: *Self,
+    width: u32,
+    height: u32,
+    format: vk.Format,
+    tiling: vk.ImageTiling,
+    usage: vk.ImageUsageFlags,
+    properties: vk.MemoryPropertyFlags,
+    image: *vk.Image,
+    image_memory: *vk.DeviceMemory,
+) !void {
+    const image_info: vk.ImageCreateInfo = .{
+        .image_type = .@"2d",
+        .extent = .{
+            .width = width,
+            .height = height,
+            .depth = 1,
+        },
+        .mip_levels = 1,
+        .array_layers = 1,
+        .format = format,
+        .tiling = tiling,
+        .initial_layout = .undefined,
+        .usage = usage,
+        .samples = .{ .@"1_bit" = true },
+        .sharing_mode = .exclusive,
+    };
+
+    image.* = try self.dev.createImage(&image_info, null);
+
+    const mem_requirements = self.dev.getImageMemoryRequirements(image.*);
+
+    const alloc_info: vk.MemoryAllocateInfo = .{
+        .allocation_size = mem_requirements.size,
+        .memory_type_index = try self.findMemoryType(
+            mem_requirements.memory_type_bits,
+            properties,
+        ),
+    };
+
+    image_memory.* = try self.dev.allocateMemory(&alloc_info, null);
+
+    try self.dev.bindImageMemory(image.*, image_memory.*, 0);
+}
+
+fn copyData(
+    self: *const Self,
+    comptime T: type,
+    data: []const T,
+    memory: vk.DeviceMemory,
+    size: usize,
+) !void {
+    if (data.len != size) {
+        return error.WrongLen;
+    }
+    const mapped_memory = try self.dev.mapMemory(memory, 0, size, .{});
+    const mapped_memory_buffer: [*]T = @ptrCast(mapped_memory);
+    @memcpy(mapped_memory_buffer[0..size], data);
+    self.dev.unmapMemory(memory);
+}
+
 fn createCommandBuffer(self: *Self) !void {
     const alloc_info: vk.CommandBufferAllocateInfo = .{
         .command_pool = self.command_pool,
@@ -1419,7 +1743,7 @@ fn drawFrame(self: *Self) !void {
 fn updateUniformBuffer(self: *Self, current_image: usize) !void {
     const current_time = try std.time.Instant.now();
 
-    const time: f32 = @as(f32, @floatFromInt(current_time.since(self.start_time))) / @as(f32, @floatFromInt(std.time.ms_per_s));
+    const time: f32 = @as(f32, @floatFromInt(current_time.since(self.start_time))) / @as(f32, @floatFromInt(std.time.ns_per_s));
 
     var ubo: UniformBufferObject = .{
         .model = zlm.Mat4.createAngleAxis(.unitZ, time * zlm.toRadians(90.0)),
@@ -1472,6 +1796,12 @@ fn creanupSwapChain(self: *Self) void {
 
 fn cleanup(self: *Self) void {
     self.creanupSwapChain();
+
+    self.dev.destroySampler(self.texture_image_sampler, null);
+    self.dev.destroyImageView(self.texture_image_view, null);
+
+    self.dev.destroyImage(self.texture_image, null);
+    self.dev.freeMemory(self.texture_image_memory, null);
 
     for (0..MAX_FRAMES_IN_FLIGHT) |i| {
         self.dev.destroyBuffer(self.uniform_buffers[i], null);
